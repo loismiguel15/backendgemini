@@ -1,11 +1,10 @@
-// app/api/gerar-prova/route.ts
-import { NextResponse } from "next/server";
+import type { NextApiRequest, NextApiResponse } from "next";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 type Body = {
   tema: string;
-  quantidade: number; // 10 | 20 | 30
-  banca?: string; // "FGV" | "CESPE" | "FCC" | ...
+  quantidade: number;
+  banca?: string;
   nivel?: "fácil" | "médio" | "difícil" | string;
 };
 
@@ -25,17 +24,27 @@ type ProvaGerada = {
   questoes: QuestaoGerada[];
 };
 
-export async function POST(req: Request) {
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
-    const body = (await req.json()) as Body;
+    if (req.method !== "POST") {
+      res.setHeader("Allow", ["POST"]);
+      return res.status(405).json({ error: "Método não permitido" });
+    }
 
-    const tema = (body.tema || "").trim();
-    const quantidade = clamp(Number(body.quantidade || 10), 10, 30);
-    const banca = (body.banca || "mista").trim();
-    const nivel = (body.nivel || "médio").trim();
+    const body = req.body as Body;
+
+    const tema = (body?.tema ?? "").trim();
+    const quantidade = clamp(Number(body?.quantidade ?? 10), 10, 30);
+    const banca = (body?.banca ?? "mista").trim();
+    const nivel = (body?.nivel ?? "médio").trim();
 
     if (!tema) {
-      return NextResponse.json({ error: "Tema é obrigatório." }, { status: 400 });
+      return res.status(400).json({ error: "Tema é obrigatório." });
+    }
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: "GEMINI_API_KEY não configurada na Vercel." });
     }
 
     const prompt = `
@@ -74,54 +83,42 @@ Retorne APENAS JSON VÁLIDO (sem markdown) no formato:
 }
 `.trim();
 
-    const text = await gerarComGemini(prompt);
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-    const json = safeJsonParse<ProvaGerada>(text);
+    const result = await model.generateContent(prompt);
+    const text = result.response.text();
 
-    if (!json || !Array.isArray(json.questoes)) {
-      return NextResponse.json(
-        { error: "Resposta inválida do modelo", raw: text.slice(0, 800) },
-        { status: 500 }
-      );
+    const parsed = safeJsonParse<ProvaGerada>(text);
+
+    if (!parsed || !Array.isArray(parsed.questoes)) {
+      return res.status(500).json({
+        error: "Resposta inválida do modelo",
+        raw: text.slice(0, 800),
+      });
     }
 
-    // garante tamanho certo
-    json.questoes = json.questoes.slice(0, quantidade);
+    const out: ProvaGerada = {
+      titulo: parsed.titulo ?? `Simulado - ${tema}`,
+      tema: parsed.tema ?? tema,
+      questoes: parsed.questoes.slice(0, quantidade),
+    };
 
-    return NextResponse.json(json);
+    return res.status(200).json(out);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Erro interno";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return res.status(500).json({ error: message });
   }
-}
-
-/** Gemini caller */
-async function gerarComGemini(prompt: string): Promise<string> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error("GEMINI_API_KEY não configurada no .env.local");
-  }
-
-  const genAI = new GoogleGenerativeAI(apiKey);
-
-  // Você pode trocar o modelo depois (flash é rápido/barato)
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
-  const result = await model.generateContent(prompt);
-  const text = result.response.text();
-
-  return text;
 }
 
 /** Parse seguro */
 function safeJsonParse<T>(text: string): T | null {
-  // tenta direto
   try {
     return JSON.parse(text) as T;
   } catch {
-    // tenta extrair o primeiro bloco JSON
     const start = text.indexOf("{");
     const end = text.lastIndexOf("}");
+
     if (start >= 0 && end > start) {
       try {
         return JSON.parse(text.slice(start, end + 1)) as T;
@@ -129,9 +126,12 @@ function safeJsonParse<T>(text: string): T | null {
         return null;
       }
     }
+
     return null;
   }
 }
+
+
 
 function clamp(n: number, min: number, max: number) {
   if (Number.isNaN(n)) return min;
