@@ -2,10 +2,10 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 type Body = {
-  tema: string;
-  quantidade: number;
-  banca?: string;
-  nivel?: "fácil" | "médio" | "difícil" | string;
+  tema?: unknown;
+  quantidade?: unknown;
+  banca?: unknown;
+  nivel?: unknown;
 };
 
 type QuestaoGerada = {
@@ -24,19 +24,37 @@ type ProvaGerada = {
   questoes: QuestaoGerada[];
 };
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+type ApiOk = ProvaGerada;
+type ApiErr = { error: string; detail?: string; raw?: string };
+
+export default async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ApiOk | ApiErr>
+) {
+  // ✅ CORS (para Expo Web / Chrome)
+  const allowedOrigin = process.env.CORS_ORIGIN ?? "*";
+  res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  // ✅ Preflight
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  if (req.method !== "POST") {
+    res.setHeader("Allow", ["POST", "OPTIONS"]);
+    return res.status(405).json({ error: "Método não permitido" });
+  }
+
   try {
-    if (req.method !== "POST") {
-      res.setHeader("Allow", ["POST"]);
-      return res.status(405).json({ error: "Método não permitido" });
-    }
+    const body = (req.body ?? {}) as Body;
 
-    const body = req.body as Body;
-
-    const tema = (body?.tema ?? "").trim();
-    const quantidade = clamp(Number(body?.quantidade ?? 10), 10, 30);
-    const banca = (body?.banca ?? "mista").trim();
-    const nivel = (body?.nivel ?? "médio").trim();
+    const tema = typeof body.tema === "string" ? body.tema.trim() : "";
+    const quantidade = clamp(toNumber(body.quantidade, 10), 10, 30);
+    const banca = typeof body.banca === "string" ? body.banca.trim() : "mista";
+    const nivel = typeof body.nivel === "string" ? body.nivel.trim() : "médio";
 
     if (!tema) {
       return res.status(400).json({ error: "Tema é obrigatório." });
@@ -84,9 +102,15 @@ Retorne APENAS JSON VÁLIDO (sem markdown) no formato:
 `.trim();
 
     const genAI = new GoogleGenerativeAI(apiKey);
+
+    // ✅ Gemini 2.5 Flash (fixo)
     const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
-    const result = await model.generateContent(prompt);
+    // Forma mais estável de enviar o prompt
+    const result = await model.generateContent({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+    });
+
     const text = result.response.text();
 
     const parsed = safeJsonParse<ProvaGerada>(text);
@@ -99,26 +123,26 @@ Retorne APENAS JSON VÁLIDO (sem markdown) no formato:
     }
 
     const out: ProvaGerada = {
-      titulo: parsed.titulo ?? `Simulado - ${tema}`,
-      tema: parsed.tema ?? tema,
+      titulo: (parsed.titulo && String(parsed.titulo).trim()) || `Simulado - ${tema}`,
+      tema: (parsed.tema && String(parsed.tema).trim()) || tema,
       questoes: parsed.questoes.slice(0, quantidade),
     };
 
     return res.status(200).json(out);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Erro interno";
-    return res.status(500).json({ error: message });
+    return res.status(500).json({ error: "Erro ao gerar prova", detail: message });
   }
 }
 
-/** Parse seguro */
+// ---------- helpers ----------
+
 function safeJsonParse<T>(text: string): T | null {
   try {
     return JSON.parse(text) as T;
   } catch {
     const start = text.indexOf("{");
     const end = text.lastIndexOf("}");
-
     if (start >= 0 && end > start) {
       try {
         return JSON.parse(text.slice(start, end + 1)) as T;
@@ -126,12 +150,14 @@ function safeJsonParse<T>(text: string): T | null {
         return null;
       }
     }
-
     return null;
   }
 }
 
-
+function toNumber(v: unknown, fallback: number) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
 
 function clamp(n: number, min: number, max: number) {
   if (Number.isNaN(n)) return min;
