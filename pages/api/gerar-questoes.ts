@@ -102,10 +102,11 @@ function toQuestaoIAList(raw: unknown): { titulo?: string; tema?: string; questo
 }
 
 async function generateWithFallback(genAI: GoogleGenerativeAI, prompt: string): Promise<string> {
-  // ✅ Modelos mais compatíveis primeiro
-  const models = ["gemini-1.5-pro", "gemini-pro"] as const;
+  // ✅ Ordem: rápido/barato primeiro + fallbacks compatíveis
+  const models = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-pro"] as const;
 
   let lastErr: unknown = null;
+
   for (const name of models) {
     try {
       const model = genAI.getGenerativeModel({ model: name });
@@ -119,6 +120,7 @@ async function generateWithFallback(genAI: GoogleGenerativeAI, prompt: string): 
   const msg = lastErr instanceof Error ? lastErr.message : String(lastErr ?? "erro");
   throw new Error(`Nenhum modelo disponível. Último erro: ${msg}`);
 }
+
 
 export default async function handler(
   req: NextApiRequest,
